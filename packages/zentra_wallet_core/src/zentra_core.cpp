@@ -69,21 +69,8 @@ ZENTRA_API int zentra_validate_address(const char* address, int network) {
 
 ZENTRA_API char* zentra_atomic_to_display(uint64_t atomic) {
   const uint64_t whole = atomic / ZENTRA_ATOMIC_UNITS;
-  const uint64_t frac = atomic % ZENTRA_ATOMIC_UNITS;
   char buf[64];
-  if (frac == 0) {
-    snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(whole));
-  } else {
-    snprintf(buf, sizeof(buf), "%llu.%09llu",
-             static_cast<unsigned long long>(whole),
-             static_cast<unsigned long long>(frac));
-    // trim trailing zeros
-    char* end = buf + strlen(buf) - 1;
-    while (end > buf && *end == '0') {
-      *end-- = '\0';
-    }
-    if (*end == '.') *end = '\0';
-  }
+  snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(whole));
   return duplicate_c_string(buf);
 }
 

@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:zentra_wallet_core/zentra_wallet_core.dart';
 
+import '../core/ui_format.dart';
 import '../core/native_wallet_messages.dart';
 import '../core/wallet_sync_progress.dart';
 import '../core/network/zentra_network.dart';
@@ -988,8 +989,7 @@ class WalletProvider extends ChangeNotifier {
     return locked > 0 ? locked : 0;
   }
 
-  String formatAmount(int atomic) =>
-      _wallet?.formatAtomic(atomic) ?? ZentraCore.instance.atomicToDisplay(atomic);
+  String formatAmount(int atomic) => UiFormat.ztraAmount(atomic);
 
   int parseAmount(String display) =>
       _wallet?.parseDisplay(display) ?? ZentraCore.instance.displayToAtomic(display);

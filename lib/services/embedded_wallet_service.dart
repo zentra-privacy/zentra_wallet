@@ -2,6 +2,7 @@ import 'dart:ffi' as ffi;
 
 import 'package:zentra_wallet_core/zentra_wallet_core.dart';
 
+import '../core/ui_format.dart';
 import '../core/native_wallet_messages.dart';
 import '../core/network/zentra_network.dart';
 import '../core/wallet_exception.dart';
@@ -212,7 +213,7 @@ class EmbeddedWalletService {
   bool validateAddress(String address) =>
       _native.addressValid(address.trim(), nettypeIndex);
 
-  String formatAtomic(int atomic) => ZentraCore.instance.atomicToDisplay(atomic);
+  String formatAtomic(int atomic) => UiFormat.ztraAmount(atomic);
 
   int parseDisplay(String display) => ZentraCore.instance.displayToAtomic(display.trim());
 
