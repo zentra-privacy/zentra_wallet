@@ -461,46 +461,55 @@ void showZentraTxDetailSheet(
   final t = transfer;
   showModalBottomSheet<void>(
     context: context,
+    isScrollControlled: true,
     backgroundColor: ZentraTheme.card,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(ZentraTheme.radiusLg)),
     ),
-    builder: (ctx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: ZentraTheme.border,
-                  borderRadius: BorderRadius.circular(2),
+    builder: (ctx) {
+      final maxHeight = MediaQuery.sizeOf(ctx).height * 0.85;
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxHeight),
+            child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: ZentraTheme.border,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(height: 16),
+                Text(
+                  t.isIncoming ? 'Incoming transfer' : 'Outgoing transfer',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 16),
+                ZentraCopyField(label: 'Amount', value: '${formatAmount(t.amountAtomic)} ZTRA', maxLines: 1),
+                const SizedBox(height: 12),
+                ZentraCopyField(label: 'Transaction ID', value: t.txid),
+                const SizedBox(height: 12),
+                Text(
+                  '${UiFormat.relativeTime(t.timestamp)} · ${t.confirmations} confirmations'
+                  '${t.pending ? ' · Pending' : ''}',
+                  style: const TextStyle(color: ZentraTheme.textMuted, fontSize: 12),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            Text(
-              t.isIncoming ? 'Incoming transfer' : 'Outgoing transfer',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
-            const SizedBox(height: 16),
-            ZentraCopyField(label: 'Amount', value: '${formatAmount(t.amountAtomic)} ZTRA', maxLines: 1),
-            const SizedBox(height: 12),
-            ZentraCopyField(label: 'Transaction ID', value: t.txid),
-            const SizedBox(height: 12),
-            Text(
-              '${UiFormat.relativeTime(t.timestamp)} · ${t.confirmations} confirmations'
-              '${t.pending ? ' · Pending' : ''}',
-              style: const TextStyle(color: ZentraTheme.textMuted, fontSize: 12),
-            ),
-          ],
+          ),
         ),
-      ),
-    ),
+      );
+    },
   );
 }
 

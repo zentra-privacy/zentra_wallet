@@ -291,6 +291,17 @@ class WalletProvider extends ChangeNotifier {
     await _applyNativeSnapshot(snap, includeTransfers: includeTransfers);
   }
 
+  /// Wallet-file cache (no daemon refresh) — show balance/history before sync finishes.
+  Future<void> _loadCachedWalletSnapshot() async {
+    if (_wallet == null || !_wallet!.isOpen) return;
+    await _blockchainJobs.run(() async {
+      final snap = await _wallet!.fetchSnapshot(includeTransfers: true);
+      await _applyNativeSnapshot(snap, includeTransfers: true);
+      _lastSnapshotWalletHeight = snap.walletHeight;
+      _lastSnapshotBalance = snap.balanceAtomic;
+    });
+  }
+
   Future<void> _applyNativeSnapshot(
     WalletNativeSnapshot snap, {
     required bool includeTransfers,
@@ -306,8 +317,11 @@ class WalletProvider extends ChangeNotifier {
     walletScanHeight = snap.restoreHeight;
     if (includeTransfers) {
       final list = EmbeddedWalletService.transfersFromSnapshot(snap);
-      await _sortTransfersWithYield(list);
-      transfers = list;
+      // wallet2 may return [] until refresh; keep on-disk history visible meanwhile.
+      if (list.isNotEmpty || transfers.isEmpty) {
+        await _sortTransfersWithYield(list);
+        transfers = list;
+      }
     }
   }
 
@@ -463,11 +477,14 @@ class WalletProvider extends ChangeNotifier {
     }
   }
 
-  /// Blocking refresh + snapshot before native background sync (daemon height is 0 until then).
+  /// Daemon refresh after [_loadCachedWalletSnapshot] (updates balance + any new txs).
   Future<void> _runInitialWalletRefresh() async {
     await _blockchainJobs.run(() async {
       await _wallet!.refresh();
-      await _applyWalletSnapshot();
+      final snap = await _wallet!.fetchSnapshot(includeTransfers: true);
+      await _applyNativeSnapshot(snap, includeTransfers: true);
+      _lastSnapshotWalletHeight = snap.walletHeight;
+      _lastSnapshotBalance = snap.balanceAtomic;
     });
     _updateSyncStatusFromHeights();
   }
@@ -675,11 +692,14 @@ class WalletProvider extends ChangeNotifier {
           ));
       if (_connectStale(gen)) return false;
       _wallet!.adoptHandle(WalletNativeWorker.pointerFromAddress(handleAddr));
+      await _loadCachedWalletSnapshot();
+      if (_connectStale(gen)) return false;
+      connectionState = WalletConnectionState.connected;
+      notifyListeners();
       if (waitForInitialSync) {
         await _runInitialWalletRefresh();
         if (_connectStale(gen)) return false;
       }
-      connectionState = WalletConnectionState.connected;
       await _startBlockchainSync();
       if (!waitForInitialSync) {
         // Background sync + polls only — avoid blocking refresh racing native refresh thread.
