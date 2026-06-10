@@ -44,12 +44,32 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     }
   }
 
-  void _loadMoreIfNeeded() {
+  /// When the first page is shorter than the viewport, there is nothing to scroll
+  /// and [_onScroll] never runs — load more until the list scrolls or all items show.
+  void _scheduleFillViewportIfNeeded() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _filter != 0 || !_scrollController.hasClients) return;
+      final total = context.read<WalletProvider>().transfers.length;
+      if (_visibleCount >= total) return;
+      if (_scrollController.position.maxScrollExtent > 48) return;
+
+      final before = _visibleCount;
+      setState(() {
+        _visibleCount = (_visibleCount + _loadMorePageSize).clamp(0, total);
+      });
+      if (_visibleCount > before && _visibleCount < total) {
+        _scheduleFillViewportIfNeeded();
+      }
+    });
+  }
+
+  bool _loadMoreIfNeeded() {
     final total = context.read<WalletProvider>().transfers.length;
-    if (_visibleCount >= total) return;
+    if (_visibleCount >= total) return false;
     setState(() {
       _visibleCount = (_visibleCount + _loadMorePageSize).clamp(0, total);
     });
+    return _visibleCount < total;
   }
 
   void _onFilterChanged(Set<int> selection) {
@@ -164,7 +184,9 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
 
   Widget _buildLazyAllList(BuildContext context, WalletProvider wallet, List<WalletTransfer> list) {
     final displayCount = _visibleCount.clamp(0, list.length);
-    final hasMore = displayCount < list.length;
+    if (displayCount < list.length) {
+      _scheduleFillViewportIfNeeded();
+    }
 
     return RefreshIndicator(
       color: ZentraTheme.accent,
@@ -179,27 +201,13 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
               controller: _scrollController,
               physics: const AlwaysScrollableScrollPhysics(),
               padding: _listBottomPadding(context),
-              itemCount: displayCount + (hasMore ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (index >= displayCount) {
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 16),
-                    child: Center(
-                      child: SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: ZentraTheme.accent),
-                      ),
-                    ),
-                  );
-                }
-                return _row(
-                  context,
-                  list[index],
-                  wallet.formatAmount,
-                  index < displayCount - 1,
-                );
-              },
+              itemCount: displayCount,
+              itemBuilder: (context, index) => _row(
+                context,
+                list[index],
+                wallet.formatAmount,
+                index < displayCount - 1,
+              ),
             ),
           ),
         ),
