@@ -2,11 +2,13 @@
 
 #include <wallet/api/wallet2_api.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -578,7 +580,72 @@ ZENTRA_WM_API int zentra_wm_address_valid(const char* address, int nettype) {
   return Monero::Wallet::addressValid(address, to_net(nettype)) ? 1 : 0;
 }
 
-ZENTRA_WM_API char* zentra_wm_transfers_json(ZentraWalletHandle wallet) {
+
+static std::vector<Monero::TransactionInfo*> sorted_transfers(
+    Monero::TransactionHistory* hist) {
+  std::vector<Monero::TransactionInfo*> items;
+  if (!hist) return items;
+  const auto all = hist->getAll();
+  items.reserve(all.size());
+  for (auto* ti : all) {
+    if (ti) items.push_back(ti);
+  }
+  std::sort(items.begin(), items.end(),
+            [](const Monero::TransactionInfo* a, const Monero::TransactionInfo* b) {
+              if (a->timestamp() != b->timestamp()) {
+                return a->timestamp() > b->timestamp();
+              }
+              return a->blockHeight() > b->blockHeight();
+            });
+  return items;
+}
+
+static char* transfers_json_from_items(
+    const std::vector<Monero::TransactionInfo*>& items, uint64_t start,
+    uint64_t end) {
+  std::ostringstream oss;
+  oss << "[";
+  bool first = true;
+  for (uint64_t i = start; i < end; ++i) {
+    auto* ti = items[i];
+    if (!ti) continue;
+    if (!first) oss << ",";
+    first = false;
+    const bool incoming =
+        ti->direction() == Monero::TransactionInfo::Direction_In;
+    oss << "{\"txid\":\"" << json_escape(ti->hash()) << "\""
+        << ",\"amount\":" << ti->amount()
+        << ",\"incoming\":" << (incoming ? "true" : "false")
+        << ",\"timestamp\":" << static_cast<uint64_t>(ti->timestamp())
+        << ",\"height\":" << ti->blockHeight()
+        << ",\"confirmations\":" << ti->confirmations()
+        << ",\"payment_id\":\"" << json_escape(ti->paymentId()) << "\""
+        << ",\"pending\":" << (ti->isPending() ? "true" : "false")
+        << ",\"failed\":" << (ti->isFailed() ? "true" : "false")
+        << "}";
+  }
+  oss << "]";
+  return dup_string(oss.str());
+}
+
+ZENTRA_WM_API uint64_t zentra_wm_transfers_count(ZentraWalletHandle wallet) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  auto* w = as_wallet(wallet);
+  if (!w) {
+    set_error("Wallet handle is null");
+    return 0;
+  }
+  try {
+    return sorted_transfers(w->history()).size();
+  } catch (const std::exception& e) {
+    set_error(e.what());
+    return 0;
+  }
+}
+
+ZENTRA_WM_API char* zentra_wm_transfers_json_page(ZentraWalletHandle wallet,
+                                                  uint32_t limit,
+                                                  uint32_t offset) {
   std::lock_guard<std::mutex> lock(g_mutex);
   auto* w = as_wallet(wallet);
   if (!w) {
@@ -586,38 +653,49 @@ ZENTRA_WM_API char* zentra_wm_transfers_json(ZentraWalletHandle wallet) {
     return nullptr;
   }
   try {
-    auto* hist = w->history();
-    if (!hist) {
-      return dup_string("[]");
-    }
-    const auto all = hist->getAll();
+    const auto items = sorted_transfers(w->history());
+    const uint64_t total = items.size();
+    const uint64_t start = std::min<uint64_t>(offset, total);
+    const uint64_t end =
+        limit == 0 ? total : std::min<uint64_t>(start + limit, total);
+    return transfers_json_from_items(items, start, end);
+  } catch (const std::exception& e) {
+    set_error(e.what());
+    return nullptr;
+  }
+}
+
+ZENTRA_WM_API char* zentra_wm_transfers_page_bundle(ZentraWalletHandle wallet,
+                                                    uint32_t limit,
+                                                    uint32_t offset) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  auto* w = as_wallet(wallet);
+  if (!w) {
+    set_error("Wallet handle is null");
+    return nullptr;
+  }
+  try {
+    const auto items = sorted_transfers(w->history());
+    const uint64_t total = items.size();
+    const uint64_t start = std::min<uint64_t>(offset, total);
+    const uint64_t end =
+        limit == 0 ? total : std::min<uint64_t>(start + limit, total);
     std::ostringstream oss;
-    oss << "[";
-    bool first = true;
-    for (auto* ti : all) {
-      if (!ti) continue;
-      if (!first) oss << ",";
-      first = false;
-      const bool incoming =
-          ti->direction() == Monero::TransactionInfo::Direction_In;
-      oss << "{\"txid\":\"" << json_escape(ti->hash()) << "\""
-          << ",\"amount\":" << ti->amount()
-          << ",\"incoming\":" << (incoming ? "true" : "false")
-          << ",\"timestamp\":"
-          << static_cast<uint64_t>(ti->timestamp())
-          << ",\"height\":" << ti->blockHeight()
-          << ",\"confirmations\":" << ti->confirmations()
-          << ",\"payment_id\":\"" << json_escape(ti->paymentId()) << "\""
-          << ",\"pending\":" << (ti->isPending() ? "true" : "false")
-          << ",\"failed\":" << (ti->isFailed() ? "true" : "false")
-          << "}";
-    }
-    oss << "]";
+    oss << "{\"total\":" << total << ",\"offset\":" << start << ",\"items\":";
+    char* page = transfers_json_from_items(items, start, end);
+    if (page == nullptr) return nullptr;
+    oss << page;
+    std::free(page);
+    oss << "}";
     return dup_string(oss.str());
   } catch (const std::exception& e) {
     set_error(e.what());
     return nullptr;
   }
+}
+
+ZENTRA_WM_API char* zentra_wm_transfers_json(ZentraWalletHandle wallet) {
+  return zentra_wm_transfers_json_page(wallet, 0, 0);
 }
 
 }  // extern "C"

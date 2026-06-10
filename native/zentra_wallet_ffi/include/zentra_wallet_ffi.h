@@ -92,8 +92,23 @@ ZENTRA_WM_API void zentra_wm_free_string(char* ptr);
 
 ZENTRA_WM_API int zentra_wm_address_valid(const char* address, int nettype);
 
+/// JSON page bundle: {"total":N,"offset":O,"items":[...]} — one native sort per call.
+ZENTRA_WM_API char* zentra_wm_transfers_page_bundle(
+    ZentraWalletHandle wallet,
+    uint32_t limit,
+    uint32_t offset);
+
 /// JSON array of transfers from wallet2 TransactionHistory; caller frees.
+/// Returns newest-first page. limit 0 = all (legacy).
+ZENTRA_WM_API char* zentra_wm_transfers_json_page(
+    ZentraWalletHandle wallet,
+    uint32_t limit,
+    uint32_t offset);
+
 ZENTRA_WM_API char* zentra_wm_transfers_json(ZentraWalletHandle wallet);
+
+/// Total transfer count (newest-first order matches [zentra_wm_transfers_json_page]).
+ZENTRA_WM_API uint64_t zentra_wm_transfers_count(ZentraWalletHandle wallet);
 
 #ifdef __cplusplus
 }

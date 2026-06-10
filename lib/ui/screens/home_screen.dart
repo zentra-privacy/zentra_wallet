@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/transfer_pagination.dart';
 import '../../core/ui_format.dart';
 import '../../models/wallet_models.dart';
 import '../../providers/wallet_provider.dart' show WalletProvider;
@@ -145,7 +146,7 @@ class _DashboardTab extends StatelessWidget {
       builder: (context, state, _) {
         final wallet = context.read<WalletProvider>();
         final balance = state.balance;
-        final recent = state.transfers.take(8).toList(growable: false);
+        final recent = state.transfers.take(kHomeRecentTransferCount).toList(growable: false);
 
         return RefreshIndicator(
           color: ZentraTheme.accent,

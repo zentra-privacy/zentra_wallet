@@ -8,6 +8,8 @@ class WalletNativeSnapshot {
     required this.address,
     required this.restoreHeight,
     this.transfers = const [],
+    this.transferTotalCount = 0,
+    this.transferOffset = 0,
   });
 
   final int balanceAtomic;
@@ -17,4 +19,6 @@ class WalletNativeSnapshot {
   final String address;
   final int restoreHeight;
   final List<Map<String, dynamic>> transfers;
+  final int transferTotalCount;
+  final int transferOffset;
 }

@@ -6,6 +6,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:zentra_wallet_core/zentra_wallet_core.dart';
 
+import '../core/transfer_list_merge.dart';
+import '../core/transfer_pagination.dart';
 import '../core/ui_format.dart';
 import '../core/native_wallet_messages.dart';
 import '../core/wallet_sync_progress.dart';
@@ -48,7 +50,7 @@ class WalletProvider extends ChangeNotifier {
   int _pollCount = 0;
   int _lastSnapshotWalletHeight = -1;
   int _lastSnapshotBalance = -1;
-  int _lastTransferFingerprint = 0;
+  int _lastHeadTransferFingerprint = 0;
   WalletSyncProgress? _lastSyncProgress;
 
   WalletConnectionState connectionState = WalletConnectionState.disconnected;
@@ -67,6 +69,8 @@ class WalletProvider extends ChangeNotifier {
   WalletBalance? balance;
   WalletAddress? primaryAddress;
   List<WalletTransfer> transfers = [];
+  int transferTotalCount = 0;
+  bool isLoadingMoreTransfers = false;
   int walletHeight = 0;
   int daemonBlockHeight = 0;
   String? daemonStatus;
@@ -287,9 +291,24 @@ class WalletProvider extends ChangeNotifier {
     return s.replaceFirst(RegExp(r'^Exception:\s*'), '');
   }
 
-  Future<void> _applyWalletSnapshot({bool includeTransfers = true}) async {
-    final snap = await _wallet!.fetchSnapshot(includeTransfers: includeTransfers);
-    await _applyNativeSnapshot(snap, includeTransfers: includeTransfers);
+  bool get hasMoreTransfers => transfers.length < transferTotalCount;
+
+  Future<void> _applyWalletSnapshot({
+    bool includeTransfers = true,
+    int transferLimit = kTransferInitialLoad,
+    int transferOffset = 0,
+    bool replaceAllTransfers = true,
+  }) async {
+    final snap = await _wallet!.fetchSnapshot(
+      includeTransfers: includeTransfers,
+      transferLimit: transferLimit,
+      transferOffset: transferOffset,
+    );
+    await _applyNativeSnapshot(
+      snap,
+      includeTransfers: includeTransfers,
+      replaceAllTransfers: replaceAllTransfers,
+    );
   }
 
   /// Wallet-file cache (no daemon refresh) — balance/address first; transfers load separately.
@@ -297,7 +316,11 @@ class WalletProvider extends ChangeNotifier {
     if (_wallet == null || !_wallet!.isOpen) return;
     await _blockchainJobs.run(() async {
       final snap = await _wallet!.fetchSnapshot(includeTransfers: false);
-      await _applyNativeSnapshot(snap, includeTransfers: false);
+      await _applyNativeSnapshot(
+        snap,
+        includeTransfers: false,
+        replaceAllTransfers: false,
+      );
       _lastSnapshotWalletHeight = snap.walletHeight;
       _lastSnapshotBalance = snap.balanceAtomic;
     });
@@ -308,9 +331,16 @@ class WalletProvider extends ChangeNotifier {
     try {
       await _blockchainJobs.run(() async {
         if (gen != _connectGeneration || _wallet == null || !_wallet!.isOpen) return;
-        final snap = await _wallet!.fetchSnapshot(includeTransfers: true);
+        final snap = await _wallet!.fetchSnapshot(
+          includeTransfers: true,
+          transferLimit: kTransferInitialLoad,
+        );
         if (gen != _connectGeneration) return;
-        final changed = await _applyNativeSnapshot(snap, includeTransfers: true);
+        final changed = await _applyNativeSnapshot(
+          snap,
+          includeTransfers: true,
+          replaceAllTransfers: true,
+        );
         _lastSnapshotWalletHeight = snap.walletHeight;
         _lastSnapshotBalance = snap.balanceAtomic;
         if (changed) notifyListeners();
@@ -318,9 +348,61 @@ class WalletProvider extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Loads the next page of transaction history from wallet2 (History scroll).
+  Future<void> loadMoreTransfers() async {
+    if (_wallet == null ||
+        !_wallet!.isOpen ||
+        isLoadingMoreTransfers ||
+        !hasMoreTransfers) {
+      return;
+    }
+    isLoadingMoreTransfers = true;
+    notifyListeners();
+    try {
+      await _blockchainJobs.run(() async {
+        if (_wallet == null || !_wallet!.isOpen) return;
+        final snap = await _wallet!.fetchSnapshot(
+          includeTransfers: true,
+          transferLimit: kTransferPageSize,
+          transferOffset: transfers.length,
+        );
+        final changed = await _applyNativeSnapshot(
+          snap,
+          includeTransfers: true,
+          replaceAllTransfers: false,
+        );
+        if (changed) notifyListeners();
+      });
+    } catch (_) {
+    } finally {
+      isLoadingMoreTransfers = false;
+      notifyListeners();
+    }
+  }
+
+  /// Ensures recent transfers are loaded (History tab / empty dashboard).
+  Future<void> ensureRecentTransfersLoaded() async {
+    if (_wallet == null || !_wallet!.isOpen || transfers.isNotEmpty) return;
+    if (isLoadingMoreTransfers) return;
+    await _blockchainJobs.run(() async {
+      if (_wallet == null || !_wallet!.isOpen || transfers.isNotEmpty) return;
+      final snap = await _wallet!.fetchSnapshot(
+        includeTransfers: true,
+        transferLimit: kTransferInitialLoad,
+      );
+      final changed = await _applyNativeSnapshot(
+        snap,
+        includeTransfers: true,
+        replaceAllTransfers: true,
+      );
+      if (changed) notifyListeners();
+    });
+  }
+
   Future<bool> _applyNativeSnapshot(
     WalletNativeSnapshot snap, {
     required bool includeTransfers,
+    required bool replaceAllTransfers,
   }) async {
     var changed = walletHeight != snap.walletHeight ||
         daemonBlockHeight != snap.daemonHeight ||
@@ -338,14 +420,34 @@ class WalletProvider extends ChangeNotifier {
     daemonStatus = 'Daemon height $daemonBlockHeight';
     walletScanHeight = snap.restoreHeight;
     if (includeTransfers) {
-      final fingerprint = _fingerprintRawTransfers(snap.transfers);
-      if (fingerprint != _lastTransferFingerprint) {
-        final list = EmbeddedWalletService.transfersFromSnapshot(snap);
-        // wallet2 may return [] until refresh; keep on-disk history visible meanwhile.
-        if (list.isNotEmpty || transfers.isEmpty) {
-          await _sortTransfersWithYield(list);
-          transfers = list;
-          _lastTransferFingerprint = fingerprint;
+      if (transferTotalCount != snap.transferTotalCount) {
+        transferTotalCount = snap.transferTotalCount;
+        changed = true;
+      }
+
+      final page = EmbeddedWalletService.transfersFromSnapshot(snap);
+      if (page.isEmpty && snap.transferOffset == 0 && transfers.isNotEmpty) {
+        return changed;
+      }
+
+      if (snap.transferOffset == 0) {
+        final headFingerprint =
+            fingerprintTransferHead(snap.transfers, snap.transferTotalCount);
+        final headChanged = headFingerprint != _lastHeadTransferFingerprint;
+        if (headChanged ||
+            replaceAllTransfers ||
+            transfers.isEmpty ||
+            _hasPendingTransfers()) {
+          transfers = replaceAllTransfers || transfers.isEmpty
+              ? page
+              : mergeTransferHead(transfers, page);
+          _lastHeadTransferFingerprint = headFingerprint;
+          changed = true;
+        }
+      } else {
+        final merged = appendTransferPage(transfers, page);
+        if (merged.length != transfers.length) {
+          transfers = merged;
           changed = true;
         }
       }
@@ -353,50 +455,20 @@ class WalletProvider extends ChangeNotifier {
     return changed;
   }
 
-  static int _fingerprintRawTransfers(List<Map<String, dynamic>> raw) {
-    var hash = raw.length;
-    for (final row in raw) {
-      hash = Object.hash(
-        hash,
-        row['txid'],
-        row['pending'],
-        row['amount'],
-        row['timestamp'],
-      );
-    }
-    return hash;
-  }
-
-  bool _hasPendingTransfers() => transfers.any((t) => t.pending);
-
-  /// Cake Wallet: yield so large tx lists do not freeze frames.
-  static Future<void> _sortTransfersWithYield(List<WalletTransfer> list) async {
-    if (list.length > 100) {
-      await Future<void>.delayed(Duration.zero);
-    }
-    list.sort(_compareTransfers);
-    if (list.length > 500) {
-      await Future<void>.delayed(Duration.zero);
-    }
-  }
-
-  static int _compareTransfers(WalletTransfer a, WalletTransfer b) {
-    final ta = a.timestamp;
-    final tb = b.timestamp;
-    if (ta != tb) return tb.compareTo(ta);
-    return b.height.compareTo(a.height);
-  }
-
   void _clearWalletSnapshot() {
     balance = null;
     primaryAddress = null;
     transfers = [];
+    transferTotalCount = 0;
+    isLoadingMoreTransfers = false;
     walletHeight = 0;
     daemonBlockHeight = 0;
     daemonStatus = null;
     walletScanHeight = 0;
-    _lastTransferFingerprint = 0;
+    _lastHeadTransferFingerprint = 0;
   }
+
+  bool _hasPendingTransfers() => transfers.any((t) => t.pending);
 
   void _beginWalletOperation() {
     _connectGeneration++;
@@ -459,7 +531,7 @@ class WalletProvider extends ChangeNotifier {
     _pollCount = 0;
     _lastSnapshotWalletHeight = -1;
     _lastSnapshotBalance = -1;
-    _lastTransferFingerprint = 0;
+    _lastHeadTransferFingerprint = 0;
     syncStatus = WalletSyncStatus.disconnected;
     unawaited(_setWakelock(false));
   }
@@ -517,12 +589,19 @@ class WalletProvider extends ChangeNotifier {
     }
   }
 
-  /// Daemon refresh after [_loadCachedWalletSnapshot] (updates balance + any new txs).
+  /// Daemon refresh after [_loadCachedWalletSnapshot] (updates balance + recent txs).
   Future<void> _runInitialWalletRefresh() async {
     await _blockchainJobs.run(() async {
       await _wallet!.refresh();
-      final snap = await _wallet!.fetchSnapshot(includeTransfers: true);
-      await _applyNativeSnapshot(snap, includeTransfers: true);
+      final snap = await _wallet!.fetchSnapshot(
+        includeTransfers: true,
+        transferLimit: kTransferInitialLoad,
+      );
+      await _applyNativeSnapshot(
+        snap,
+        includeTransfers: true,
+        replaceAllTransfers: true,
+      );
       _lastSnapshotWalletHeight = snap.walletHeight;
       _lastSnapshotBalance = snap.balanceAtomic;
     });
@@ -548,7 +627,10 @@ class WalletProvider extends ChangeNotifier {
         if (needTransfers && _isUpdatingTransfers) {
           needTransfers = false;
         }
-        var snap = await _wallet!.fetchSnapshot(includeTransfers: needTransfers);
+        var snap = await _wallet!.fetchSnapshot(
+          includeTransfers: needTransfers,
+          transferLimit: needTransfers ? kTransferInitialLoad : 0,
+        );
         if (snap.daemonHeight <= 0) {
           _zeroDaemonPolls++;
           if (_zeroDaemonPolls >= 10) {
@@ -556,7 +638,10 @@ class WalletProvider extends ChangeNotifier {
           }
           if (_zeroDaemonPolls == 3 || (_zeroDaemonPolls > 3 && _zeroDaemonPolls % 15 == 0)) {
             await _wallet!.refresh();
-            snap = await _wallet!.fetchSnapshot(includeTransfers: needTransfers);
+            snap = await _wallet!.fetchSnapshot(
+              includeTransfers: needTransfers,
+              transferLimit: needTransfers ? kTransferInitialLoad : 0,
+            );
           }
         } else {
           _zeroDaemonPolls = 0;
@@ -578,7 +663,11 @@ class WalletProvider extends ChangeNotifier {
         if (fetchTxs) _isUpdatingTransfers = true;
         try {
           final prevSyncStatus = syncStatus;
-          final changed = await _applyNativeSnapshot(snap, includeTransfers: needTransfers);
+          final changed = await _applyNativeSnapshot(
+            snap,
+            includeTransfers: needTransfers,
+            replaceAllTransfers: false,
+          );
           _lastSnapshotWalletHeight = snap.walletHeight;
           _lastSnapshotBalance = snap.balanceAtomic;
           _updateSyncStatusFromHeights();
@@ -1215,6 +1304,8 @@ class WalletProvider extends ChangeNotifier {
     balance = null;
     primaryAddress = null;
     transfers = [];
+    transferTotalCount = 0;
+    isLoadingMoreTransfers = false;
     walletHeight = 0;
     daemonBlockHeight = 0;
     daemonStatus = null;

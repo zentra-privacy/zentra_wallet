@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/transfer_pagination.dart';
 import '../../core/ui_format.dart';
 import '../../models/wallet_models.dart';
 import '../../providers/wallet_provider.dart' show WalletProvider;
@@ -17,14 +18,13 @@ class TransactionsScreen extends StatefulWidget {
 }
 
 class _TransactionsScreenState extends State<TransactionsScreen> {
-  static const _initialPageSize = 25;
-  static const _loadMorePageSize = 25;
+  static const _maxFilteredAutoLoadRounds = 20;
 
   int _filter = 0;
-  int _visibleCount = _initialPageSize;
+  int _filteredAutoLoadRounds = 0;
   late final ScrollController _scrollController;
   WalletProvider? _wallet;
-  bool _viewportFillQueued = false;
+
   List<WalletTransfer>? _filterCacheSource;
   List<WalletTransfer> _incomingCache = const [];
   List<WalletTransfer> _outgoingCache = const [];
@@ -33,6 +33,9 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   void initState() {
     super.initState();
     _scrollController = ScrollController()..addListener(_onScroll);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<WalletProvider>().ensureRecentTransfersLoaded();
+    });
   }
 
   @override
@@ -43,18 +46,8 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     _wallet?.removeListener(_onWalletUpdated);
     _wallet = wallet;
     wallet.addListener(_onWalletUpdated);
-    _queueViewportFill();
-  }
-
-  void _queueViewportFill() {
-    if (_viewportFillQueued) return;
-    _viewportFillQueued = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _viewportFillQueued = false;
-      final wallet = _wallet;
-      if (!mounted || wallet == null) return;
-      _scheduleFillViewportIfNeeded(_filteredList(wallet).length);
-    });
+    wallet.ensureRecentTransfersLoaded();
+    _scheduleContentChecks();
   }
 
   @override
@@ -64,16 +57,18 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     super.dispose();
   }
 
+  void _invalidateFilterCache() {
+    _filterCacheSource = null;
+    _incomingCache = const [];
+    _outgoingCache = const [];
+  }
+
   void _onWalletUpdated() {
     final wallet = _wallet;
     if (wallet == null || !mounted) return;
     if (identical(_filterCacheSource, wallet.transfers)) return;
-
-    final list = _filteredList(wallet);
-    if (_visibleCount > list.length) {
-      setState(() => _visibleCount = list.length);
-    }
-    _scheduleFillViewportIfNeeded(list.length);
+    _invalidateFilterCache();
+    _scheduleContentChecks();
   }
 
   void _onScroll() {
@@ -84,29 +79,44 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     }
   }
 
-  void _scheduleFillViewportIfNeeded(int total) {
+  void _scheduleContentChecks() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
-      if (_visibleCount >= total) return;
-      if (_scrollController.position.maxScrollExtent > 48) return;
-
-      final before = _visibleCount;
-      setState(() {
-        _visibleCount = (_visibleCount + _loadMorePageSize).clamp(0, total);
-      });
-      if (_visibleCount > before && _visibleCount < total) {
-        _scheduleFillViewportIfNeeded(total);
-      }
+      if (!mounted) return;
+      _maybeAutoLoadFiltered();
+      _maybeFillViewport();
     });
+  }
+
+  void _maybeAutoLoadFiltered() {
+    final wallet = _wallet;
+    if (wallet == null || !mounted) return;
+    if (wallet.isLoadingMoreTransfers || !wallet.hasMoreTransfers) return;
+    if (_filteredAutoLoadRounds >= _maxFilteredAutoLoadRounds) return;
+
+    final list = _filteredList(wallet);
+    final needsMoreForFilter = _filter != 0 && list.length < kTransferPageSize;
+    final showEmptyFiltered = _filter != 0 && list.isEmpty;
+    if (!showEmptyFiltered && !needsMoreForFilter) return;
+
+    _filteredAutoLoadRounds++;
+    wallet.loadMoreTransfers();
+  }
+
+  void _maybeFillViewport() {
+    if (!_scrollController.hasClients) return;
+    final wallet = _wallet;
+    if (wallet == null) return;
+    if (_scrollController.position.maxScrollExtent > 48) return;
+    if (wallet.hasMoreTransfers && !wallet.isLoadingMoreTransfers) {
+      wallet.loadMoreTransfers();
+    }
   }
 
   void _loadMoreIfNeeded() {
     final wallet = _wallet ?? context.read<WalletProvider>();
-    final total = _filteredList(wallet).length;
-    if (_visibleCount >= total) return;
-    setState(() {
-      _visibleCount = (_visibleCount + _loadMorePageSize).clamp(0, total);
-    });
+    if (wallet.hasMoreTransfers && !wallet.isLoadingMoreTransfers) {
+      wallet.loadMoreTransfers();
+    }
   }
 
   List<WalletTransfer> _filteredList(WalletProvider wallet) {
@@ -128,12 +138,12 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     if (next == _filter) return;
     setState(() {
       _filter = next;
-      _visibleCount = _initialPageSize;
+      _filteredAutoLoadRounds = 0;
     });
     if (_scrollController.hasClients) {
       _scrollController.jumpTo(0);
     }
-    _queueViewportFill();
+    _scheduleContentChecks();
   }
 
   EdgeInsets _listBottomPadding(BuildContext context) {
@@ -146,12 +156,21 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       selector: (_, wallet) => _HistoryViewState(
         transfers: wallet.transfers,
         isRefreshing: wallet.isRefreshing,
+        isLoadingMore: wallet.isLoadingMoreTransfers,
+        hasMore: wallet.hasMoreTransfers,
+        totalCount: wallet.transferTotalCount,
       ),
       builder: (context, viewState, _) {
         final wallet = context.read<WalletProvider>();
         final list = _filteredList(wallet);
+        final showLoaderTail = viewState.hasMore &&
+            (viewState.isLoadingMore || list.isNotEmpty);
 
-        final listBody = list.isEmpty
+        if (_filter != 0 && list.isEmpty && viewState.hasMore) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoLoadFiltered());
+        }
+
+        final listBody = list.isEmpty && !viewState.isLoadingMore && !viewState.hasMore
             ? RefreshIndicator(
                 color: ZentraTheme.accent,
                 onRefresh: wallet.refresh,
@@ -171,7 +190,14 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                   ],
                 ),
               )
-            : _buildLazyList(context, wallet, list);
+            : _buildLazyList(
+                context,
+                wallet,
+                list,
+                showLoaderTail: showLoaderTail,
+                loadedCount: viewState.transfers.length,
+                totalCount: viewState.totalCount,
+              );
 
         final content = Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -218,8 +244,15 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     );
   }
 
-  Widget _buildLazyList(BuildContext context, WalletProvider wallet, List<WalletTransfer> list) {
-    final displayCount = _visibleCount.clamp(0, list.length);
+  Widget _buildLazyList(
+    BuildContext context,
+    WalletProvider wallet,
+    List<WalletTransfer> list, {
+    required bool showLoaderTail,
+    required int loadedCount,
+    required int totalCount,
+  }) {
+    final itemCount = list.length + (showLoaderTail ? 1 : 0);
 
     return RefreshIndicator(
       color: ZentraTheme.accent,
@@ -234,13 +267,43 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
               controller: _scrollController,
               physics: const AlwaysScrollableScrollPhysics(),
               padding: _listBottomPadding(context),
-              itemCount: displayCount,
-              itemBuilder: (context, index) => _row(
-                context,
-                list[index],
-                wallet.formatAmount,
-                index < displayCount - 1,
-              ),
+              itemCount: itemCount,
+              itemBuilder: (context, index) {
+                if (index >= list.length) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          if (wallet.isLoadingMoreTransfers)
+                            const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: ZentraTheme.accent,
+                              ),
+                            )
+                          else
+                            Text(
+                              'Loaded $loadedCount of $totalCount',
+                              style: const TextStyle(
+                                color: ZentraTheme.textMuted,
+                                fontSize: 12,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+                return _row(
+                  context,
+                  list[index],
+                  wallet.formatAmount,
+                  index < list.length - 1,
+                );
+              },
             ),
           ),
         ),
@@ -266,18 +329,27 @@ class _HistoryViewState {
   const _HistoryViewState({
     required this.transfers,
     required this.isRefreshing,
+    required this.isLoadingMore,
+    required this.hasMore,
+    required this.totalCount,
   });
 
   final List<WalletTransfer> transfers;
   final bool isRefreshing;
+  final bool isLoadingMore;
+  final bool hasMore;
+  final int totalCount;
 
   @override
   bool operator ==(Object other) {
     return other is _HistoryViewState &&
         identical(transfers, other.transfers) &&
-        isRefreshing == other.isRefreshing;
+        isRefreshing == other.isRefreshing &&
+        isLoadingMore == other.isLoadingMore &&
+        hasMore == other.hasMore &&
+        totalCount == other.totalCount;
   }
 
   @override
-  int get hashCode => Object.hash(transfers, isRefreshing);
+  int get hashCode => Object.hash(transfers, isRefreshing, isLoadingMore, hasMore, totalCount);
 }

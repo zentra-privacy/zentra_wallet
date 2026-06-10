@@ -2,6 +2,7 @@ import 'dart:ffi' as ffi;
 
 import 'package:zentra_wallet_core/zentra_wallet_core.dart';
 
+import '../core/transfer_pagination.dart';
 import '../core/ui_format.dart';
 import '../core/native_wallet_messages.dart';
 import '../core/network/zentra_network.dart';
@@ -161,7 +162,11 @@ class EmbeddedWalletService {
     );
   }
 
-  Future<WalletNativeSnapshot> fetchSnapshot({bool includeTransfers = true}) async {
+  Future<WalletNativeSnapshot> fetchSnapshot({
+    bool includeTransfers = true,
+    int transferLimit = kTransferInitialLoad,
+    int transferOffset = 0,
+  }) async {
     _requireOpen();
     return WalletNativeWorker.snapshot(
       handleAddress: _handleAddress!,
@@ -169,6 +174,8 @@ class EmbeddedWalletService {
       daemonAddress: daemonAddress,
       trustedDaemon: _trustedDaemon,
       includeTransfers: includeTransfers,
+      transferLimit: transferLimit,
+      transferOffset: transferOffset,
     );
   }
 
@@ -195,8 +202,15 @@ class EmbeddedWalletService {
     return snap.daemonHeight;
   }
 
-  Future<List<WalletTransfer>> fetchTransfers() async {
-    final snap = await fetchSnapshot(includeTransfers: true);
+  Future<List<WalletTransfer>> fetchTransfers({
+    int limit = kTransferInitialLoad,
+    int offset = 0,
+  }) async {
+    final snap = await fetchSnapshot(
+      includeTransfers: true,
+      transferLimit: limit,
+      transferOffset: offset,
+    );
     return transfersFromSnapshot(snap);
   }
 

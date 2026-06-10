@@ -317,18 +317,81 @@ class ZentraNativeWallet {
   }
 
   List<Map<String, dynamic>> transfers(ffi.Pointer<ffi.Void> handle) {
-    final ptr = _lib.transfersJson(handle);
+    return transfersPage(handle, limit: 0, offset: 0);
+  }
+
+  int transferCount(ffi.Pointer<ffi.Void> handle) {
+    if (_lib.transfersCount != null) {
+      return _lib.transfersCount!(handle);
+    }
+    return transfers(handle).length;
+  }
+
+  List<Map<String, dynamic>> transfersPage(
+    ffi.Pointer<ffi.Void> handle, {
+    required int limit,
+    required int offset,
+  }) {
+    return transfersPageBundle(
+      handle,
+      limit: limit,
+      offset: offset,
+    ).items;
+  }
+
+  ({int total, int offset, List<Map<String, dynamic>> items}) transfersPageBundle(
+    ffi.Pointer<ffi.Void> handle, {
+    required int limit,
+    required int offset,
+  }) {
+    if (_lib.transfersPageBundle != null) {
+      final ptr = _lib.transfersPageBundle!(handle, limit, offset);
+      if (ptr == ffi.nullptr) throw NativeWalletUnavailable(_lastError());
+      final json = _takeString(ptr);
+      final decoded = jsonDecode(json);
+      if (decoded is! Map) {
+        return (total: 0, offset: offset, items: const <Map<String, dynamic>>[]);
+      }
+      final map = Map<String, dynamic>.from(
+        decoded.map((k, v) => MapEntry(k.toString(), v)),
+      );
+      final total = (map['total'] as num?)?.toInt() ?? 0;
+      final pageOffset = (map['offset'] as num?)?.toInt() ?? offset;
+      final rawItems = map['items'];
+      final items = <Map<String, dynamic>>[
+        if (rawItems is List)
+          for (final item in rawItems)
+            if (item is Map)
+              Map<String, dynamic>.from(
+                item.map((k, v) => MapEntry(k.toString(), v)),
+              ),
+      ];
+      return (total: total, offset: pageOffset, items: items);
+    }
+
+    final total = transferCount(handle);
+    final ptr = _lib.transfersJsonPage != null
+        ? _lib.transfersJsonPage!(handle, limit, offset)
+        : _lib.transfersJson(handle);
     if (ptr == ffi.nullptr) throw NativeWalletUnavailable(_lastError());
     final json = _takeString(ptr);
     final decoded = jsonDecode(json);
-    if (decoded is! List) return [];
-    return [
+    if (decoded is! List) {
+      return (total: total, offset: offset, items: const <Map<String, dynamic>>[]);
+    }
+    var list = [
       for (final item in decoded)
         if (item is Map)
           Map<String, dynamic>.from(
             item.map((k, v) => MapEntry(k.toString(), v)),
           ),
     ];
+    if (_lib.transfersJsonPage == null && limit > 0) {
+      final start = offset.clamp(0, list.length);
+      final end = (start + limit).clamp(0, list.length);
+      list = list.sublist(start, end);
+    }
+    return (total: total, offset: offset, items: list);
   }
 
   String _lastError() {
@@ -376,7 +439,10 @@ class _NativeLib {
         lastError = lib.lookupFunction<_LastErrorNative, _LastError>('zentra_wm_last_error'),
         freeString = lib.lookupFunction<_FreeNative, _Free>('zentra_wm_free_string'),
         addressValid = lib.lookupFunction<_AddrValidNative, _AddrValid>('zentra_wm_address_valid'),
-        transfersJson = lib.lookupFunction<_StrNative, _Str>('zentra_wm_transfers_json');
+        transfersJson = lib.lookupFunction<_StrNative, _Str>('zentra_wm_transfers_json'),
+        transfersJsonPage = _tryLookupTransfersPage(lib),
+        transfersPageBundle = _tryLookupTransfersPageBundle(lib),
+        transfersCount = _tryLookupTransfersCount(lib);
 
   final _Init init;
   final _Void shutdown;
@@ -403,6 +469,9 @@ class _NativeLib {
   final _Free freeString;
   final _AddrValid addressValid;
   final _Str transfersJson;
+  final _TransfersPage? transfersJsonPage;
+  final _TransfersPage? transfersPageBundle;
+  final _Bal? transfersCount;
 }
 
 typedef _InitNative = ffi.Int32 Function(ffi.Pointer<Utf8>);
@@ -440,12 +509,43 @@ typedef _SetHeightNative = ffi.Int32 Function(ffi.Pointer<ffi.Void>, ffi.Uint64)
 typedef _SetHeight = int Function(ffi.Pointer<ffi.Void>, int);
 typedef _PauseBgNative = ffi.Int32 Function(ffi.Pointer<ffi.Void>);
 typedef _PauseBg = int Function(ffi.Pointer<ffi.Void>);
+typedef _TransfersPageNative = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void>, ffi.Uint32, ffi.Uint32);
+typedef _TransfersPage = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void>, int, int);
 
 _PauseBg? _tryLookupPauseBg(ffi.DynamicLibrary lib) {
   try {
     return lib.lookupFunction<_PauseBgNative, _PauseBg>(
       'zentra_wm_pause_background_refresh',
     );
+  } catch (_) {
+    return null;
+  }
+}
+
+_TransfersPage? _tryLookupTransfersPage(ffi.DynamicLibrary lib) {
+  try {
+    return lib.lookupFunction<_TransfersPageNative, _TransfersPage>(
+      'zentra_wm_transfers_json_page',
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+_TransfersPage? _tryLookupTransfersPageBundle(ffi.DynamicLibrary lib) {
+  try {
+    return lib.lookupFunction<_TransfersPageNative, _TransfersPage>(
+      'zentra_wm_transfers_page_bundle',
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+_Bal? _tryLookupTransfersCount(ffi.DynamicLibrary lib) {
+  try {
+    return lib.lookupFunction<_BalNative, _Bal>('zentra_wm_transfers_count');
   } catch (_) {
     return null;
   }

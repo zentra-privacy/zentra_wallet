@@ -86,7 +86,9 @@ class WalletNativeWorker {
     required String walletDir,
     required String daemonAddress,
     required bool trustedDaemon,
-    bool includeTransfers = true,
+    bool includeTransfers = false,
+    int transferLimit = 0,
+    int transferOffset = 0,
   }) {
     return Isolate.run(() => _snapshot(
           handleAddress: handleAddress,
@@ -94,6 +96,8 @@ class WalletNativeWorker {
           daemonAddress: daemonAddress,
           trustedDaemon: trustedDaemon,
           includeTransfers: includeTransfers,
+          transferLimit: transferLimit,
+          transferOffset: transferOffset,
         ));
   }
 
@@ -299,11 +303,20 @@ class WalletNativeWorker {
     required String daemonAddress,
     required bool trustedDaemon,
     required bool includeTransfers,
+    required int transferLimit,
+    required int transferOffset,
   }) {
     final native = _loadNative(walletDir, daemonAddress, trustedDaemon);
     final handle = _ptr(handleAddress);
+    final bundle = includeTransfers
+        ? native.transfersPageBundle(
+            handle,
+            limit: transferLimit > 0 ? transferLimit : 1 << 20,
+            offset: transferOffset,
+          )
+        : (total: 0, offset: 0, items: const <Map<String, dynamic>>[]);
     final transfers = includeTransfers
-        ? native.transfers(handle).map((r) => Map<String, dynamic>.from(r)).toList()
+        ? bundle.items.map((r) => Map<String, dynamic>.from(r)).toList()
         : const <Map<String, dynamic>>[];
     return WalletNativeSnapshot(
       balanceAtomic: native.balance(handle),
@@ -313,6 +326,8 @@ class WalletNativeWorker {
       address: native.address(handle),
       restoreHeight: native.restoreHeight(handle),
       transfers: transfers,
+      transferTotalCount: bundle.total,
+      transferOffset: bundle.offset,
     );
   }
 
