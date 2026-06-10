@@ -1,7 +1,7 @@
 name: zentra_wallet
 description: Zentra self-custody wallet — Flutter UI + embedded wallet2 (Cake/Monero-style).
 publish_to: 'none'
-version: 1.2.1+1
+version: 1.2.2+2
 
 environment:
   sdk: ^3.12.0
