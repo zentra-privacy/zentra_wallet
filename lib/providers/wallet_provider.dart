@@ -51,6 +51,7 @@ class WalletProvider extends ChangeNotifier {
   int _lastSnapshotWalletHeight = -1;
   int _lastSnapshotBalance = -1;
   int _lastHeadTransferFingerprint = 0;
+  bool _scanCheckpointRepairInFlight = false;
   WalletSyncProgress? _lastSyncProgress;
 
   WalletConnectionState connectionState = WalletConnectionState.disconnected;
@@ -426,33 +427,74 @@ class WalletProvider extends ChangeNotifier {
       }
 
       final page = EmbeddedWalletService.transfersFromSnapshot(snap);
-      if (page.isEmpty && snap.transferOffset == 0 && transfers.isNotEmpty) {
-        return changed;
-      }
-
-      if (snap.transferOffset == 0) {
-        final headFingerprint =
-            fingerprintTransferHead(snap.transfers, snap.transferTotalCount);
-        final headChanged = headFingerprint != _lastHeadTransferFingerprint;
-        if (headChanged ||
-            replaceAllTransfers ||
-            transfers.isEmpty ||
-            _hasPendingTransfers()) {
-          transfers = replaceAllTransfers || transfers.isEmpty
-              ? page
-              : mergeTransferHead(transfers, page);
-          _lastHeadTransferFingerprint = headFingerprint;
-          changed = true;
-        }
-      } else {
-        final merged = appendTransferPage(transfers, page);
-        if (merged.length != transfers.length) {
-          transfers = merged;
-          changed = true;
+      final skipTransferMerge =
+          page.isEmpty && snap.transferOffset == 0 && transfers.isNotEmpty;
+      if (!skipTransferMerge) {
+        if (snap.transferOffset == 0) {
+          final headFingerprint =
+              fingerprintTransferHead(snap.transfers, snap.transferTotalCount);
+          final headChanged = headFingerprint != _lastHeadTransferFingerprint;
+          if (headChanged ||
+              replaceAllTransfers ||
+              transfers.isEmpty ||
+              _hasPendingTransfers()) {
+            transfers = replaceAllTransfers || transfers.isEmpty
+                ? page
+                : mergeTransferHead(transfers, page);
+            _lastHeadTransferFingerprint = headFingerprint;
+            changed = true;
+          }
+        } else {
+          final merged = appendTransferPage(transfers, page);
+          if (merged.length != transfers.length) {
+            transfers = merged;
+            changed = true;
+          }
         }
       }
     }
+    if (RestoreHeightUtils.needsScanCheckpointRepair(
+      scanHeight: snap.restoreHeight,
+      walletHeight: snap.walletHeight,
+      daemonHeight: snap.daemonHeight,
+      isSynced: _isSnapSynced(snap),
+    )) {
+      unawaited(_repairMissingScanCheckpoint(
+        walletHeight: snap.walletHeight,
+        daemonHeight: snap.daemonHeight,
+      ));
+    }
     return changed;
+  }
+
+  bool _isSnapSynced(WalletNativeSnapshot snap) {
+    if (snap.daemonHeight <= 0 || snap.walletHeight <= 0) return false;
+    return snap.daemonHeight - snap.walletHeight < kWalletSyncedBlocksThreshold;
+  }
+
+  /// Legacy wallets synced to tip but missing refresh-from in the wallet file.
+  Future<void> _repairMissingScanCheckpoint({
+    required int walletHeight,
+    required int daemonHeight,
+  }) async {
+    if (_wallet == null || !_wallet!.isOpen || _scanCheckpointRepairInFlight) return;
+    final checkpoint = RestoreHeightUtils.scanCheckpointFromProgress(
+      walletHeight: walletHeight,
+      daemonHeight: daemonHeight,
+    );
+    if (checkpoint <= 0) return;
+    _scanCheckpointRepairInFlight = true;
+    try {
+      await _blockchainJobs.run(() async {
+        if (_wallet == null || !_wallet!.isOpen) return;
+        await _wallet!.setRestoreHeight(checkpoint);
+      });
+      walletScanHeight = checkpoint;
+      notifyListeners();
+    } catch (_) {
+    } finally {
+      _scanCheckpointRepairInFlight = false;
+    }
   }
 
   void _clearWalletSnapshot() {
@@ -466,6 +508,7 @@ class WalletProvider extends ChangeNotifier {
     daemonStatus = null;
     walletScanHeight = 0;
     _lastHeadTransferFingerprint = 0;
+    _scanCheckpointRepairInFlight = false;
   }
 
   bool _hasPendingTransfers() => transfers.any((t) => t.pending);
@@ -895,10 +938,15 @@ class WalletProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Applies restore height to the open wallet and saves as default.
+  /// Applies a custom scan-from height to the open wallet (requires [height] > 0).
   Future<bool> applyRestoreHeightToOpenWallet(int height) async {
     if (_wallet == null || !_wallet!.isOpen) {
       errorMessage = 'Open a wallet first';
+      notifyListeners();
+      return false;
+    }
+    if (height <= 0) {
+      errorMessage = 'Enter a block height above 0 to resync from that block';
       notifyListeners();
       return false;
     }

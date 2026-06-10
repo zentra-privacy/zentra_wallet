@@ -77,7 +77,7 @@ class RestoreHeightField extends StatelessWidget {
                   : restoreOnly
                       ? 'Wrong block may hide balance until fully scanned'
                       : showRestoreHint
-                          ? 'Restore: block when wallet was first used. Leave off to use saved/default height.'
+                          ? 'For seed restore: first block you received ZTRA. Off = auto near chain tip.'
                           : 'Leave off to use estimated height. Must be below chain tip (not equal to daemon height).',
               helperMaxLines: restoreOnly ? 2 : (compact ? 1 : 3),
             ),

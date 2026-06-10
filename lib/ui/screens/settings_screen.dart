@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/restore_height_utils.dart';
 import '../../core/native_wallet_messages.dart';
 import '../../models/wallet_models.dart';
 import '../../providers/wallet_provider.dart' show WalletConnectionState, WalletProvider;
@@ -32,6 +33,9 @@ class SettingsScreen extends StatelessWidget {
         primaryAddress: wallet.primaryAddress?.address,
         walletFilename: wallet.walletFilename,
         defaultRestoreHeight: wallet.defaultRestoreHeight,
+        walletScanHeight: wallet.walletScanHeight,
+        walletHeight: wallet.walletHeight,
+        isSynced: wallet.isSynced,
         nodeSettings: wallet.nodeSettings,
         networkLabel: wallet.networkConfig?.label,
         nativeAvailable: wallet.nativeAvailable,
@@ -128,9 +132,13 @@ class SettingsScreen extends StatelessWidget {
                 ZentraSettingsTile(
                   icon: Icons.height_outlined,
                   title: 'Restore / sync height',
-                  subtitle: state.defaultRestoreHeight > 0
-                      ? 'Default block ${state.defaultRestoreHeight}'
-                      : 'Default block height and resync',
+                  subtitle: RestoreHeightUtils.settingsSubtitle(
+                    connected: state.connectionState == WalletConnectionState.connected,
+                    scanHeight: state.walletScanHeight,
+                    walletHeight: state.walletHeight,
+                    defaultRestoreHeight: state.defaultRestoreHeight,
+                    isSynced: state.isSynced,
+                  ),
                   showDivider: false,
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const RestoreSyncHeightScreen()),
@@ -242,6 +250,9 @@ class _SettingsViewState {
     required this.primaryAddress,
     required this.walletFilename,
     required this.defaultRestoreHeight,
+    required this.walletScanHeight,
+    required this.walletHeight,
+    required this.isSynced,
     required this.nodeSettings,
     required this.networkLabel,
     required this.nativeAvailable,
@@ -258,6 +269,9 @@ class _SettingsViewState {
   final String? primaryAddress;
   final String? walletFilename;
   final int defaultRestoreHeight;
+  final int walletScanHeight;
+  final int walletHeight;
+  final bool isSynced;
   final NodeConnectionSettings? nodeSettings;
   final String? networkLabel;
   final bool nativeAvailable;
@@ -276,6 +290,9 @@ class _SettingsViewState {
         primaryAddress == other.primaryAddress &&
         walletFilename == other.walletFilename &&
         defaultRestoreHeight == other.defaultRestoreHeight &&
+        walletScanHeight == other.walletScanHeight &&
+        walletHeight == other.walletHeight &&
+        isSynced == other.isSynced &&
         nodeSettings == other.nodeSettings &&
         networkLabel == other.networkLabel &&
         nativeAvailable == other.nativeAvailable;
@@ -294,6 +311,9 @@ class _SettingsViewState {
         primaryAddress,
         walletFilename,
         defaultRestoreHeight,
+        walletScanHeight,
+        walletHeight,
+        isSynced,
         nodeSettings,
         networkLabel,
         nativeAvailable,

@@ -104,6 +104,14 @@ bool persist_scan_checkpoint(Monero::Wallet* w) {
   return true;
 }
 
+/// Brand-new wallet: start near chain tip instead of genesis when height not specified.
+void apply_new_wallet_scan_start(Monero::Wallet* w) {
+  const uint64_t daemon_h = w->daemonBlockChainHeight();
+  if (daemon_h > kScanHeightMargin) {
+    w->setRefreshFromBlockHeight(daemon_h - kScanHeightMargin);
+  }
+}
+
 /// wallet2::init — required before refresh/balance/daemon RPC (Monero/Cake flow).
 /// refresh_height < 0: keep height already in wallet file (open / restore).
 bool bind_wallet_to_daemon(Monero::Wallet* w, bool persist, int64_t refresh_height) {
@@ -280,7 +288,18 @@ ZENTRA_WM_API ZentraWalletHandle zentra_wm_create_wallet(
       if (w) g_wm->closeWallet(w, false);
       return nullptr;
     }
-    if (!bind_wallet_to_daemon(w, true, static_cast<int64_t>(restore_height))) {
+    if (!bind_wallet_to_daemon(w, false, -1)) {
+      g_wm->closeWallet(w, false);
+      return nullptr;
+    }
+    if (restore_height > 0) {
+      w->setRefreshFromBlockHeight(clamp_refresh_height(w, restore_height));
+    } else {
+      apply_new_wallet_scan_start(w);
+    }
+    if (!w->store("")) {
+      const auto err = w->errorString();
+      set_error(err.empty() ? "wallet store failed" : err);
       g_wm->closeWallet(w, false);
       return nullptr;
     }
@@ -555,6 +574,11 @@ ZENTRA_WM_API int zentra_wm_store(ZentraWalletHandle wallet) {
   auto* w = as_wallet(wallet);
   if (!check_wallet(w)) return 0;
   try {
+    const uint64_t daemon_h = w->daemonBlockChainHeight();
+    const uint64_t wallet_h = w->blockChainHeight();
+    if (daemon_h > 0 && wallet_h > 0) {
+      return persist_scan_checkpoint(w) ? 1 : 0;
+    }
     if (!w->store("")) {
       const auto err = w->errorString();
       set_error(err.empty() ? "wallet store failed" : err);
