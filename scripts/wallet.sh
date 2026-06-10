@@ -289,6 +289,7 @@ case "${1:-}" in
   run|start) shift; cmd_run_app "$@" ;;
   devices) cmd_devices ;;
   clean-data) shift; cmd_clean_data "$@" ;;
+  release) shift; exec "$ROOT/scripts/release.sh" "$@" ;;
   full|all) cmd_full_flow ;;
   help|-h|--help)
     cat <<EOF
@@ -306,6 +307,7 @@ Zentra Wallet — ./wallet.sh
   ./wallet.sh build-app-ios     iOS XCFramework + simulator/device app
   ./wallet.sh build-apple-production  Mac + iPhone/iPad release files → dist/apple/
   ./wallet.sh run          Run Linux app
+  ./wallet.sh release      GitHub community release (APK + Linux)
   ./wallet.sh full         build + run
   ./wallet.sh status       Zentra / native lib / Flutter
 
