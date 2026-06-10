@@ -48,6 +48,7 @@ class WalletProvider extends ChangeNotifier {
   int _pollCount = 0;
   int _lastSnapshotWalletHeight = -1;
   int _lastSnapshotBalance = -1;
+  int _lastTransferFingerprint = 0;
   WalletSyncProgress? _lastSyncProgress;
 
   WalletConnectionState connectionState = WalletConnectionState.disconnected;
@@ -291,21 +292,42 @@ class WalletProvider extends ChangeNotifier {
     await _applyNativeSnapshot(snap, includeTransfers: includeTransfers);
   }
 
-  /// Wallet-file cache (no daemon refresh) — show balance/history before sync finishes.
+  /// Wallet-file cache (no daemon refresh) — balance/address first; transfers load separately.
   Future<void> _loadCachedWalletSnapshot() async {
     if (_wallet == null || !_wallet!.isOpen) return;
     await _blockchainJobs.run(() async {
-      final snap = await _wallet!.fetchSnapshot(includeTransfers: true);
-      await _applyNativeSnapshot(snap, includeTransfers: true);
+      final snap = await _wallet!.fetchSnapshot(includeTransfers: false);
+      await _applyNativeSnapshot(snap, includeTransfers: false);
       _lastSnapshotWalletHeight = snap.walletHeight;
       _lastSnapshotBalance = snap.balanceAtomic;
     });
   }
 
-  Future<void> _applyNativeSnapshot(
+  Future<void> _loadTransfersSnapshot(int gen) async {
+    if (_wallet == null || !_wallet!.isOpen || gen != _connectGeneration) return;
+    try {
+      await _blockchainJobs.run(() async {
+        if (gen != _connectGeneration || _wallet == null || !_wallet!.isOpen) return;
+        final snap = await _wallet!.fetchSnapshot(includeTransfers: true);
+        if (gen != _connectGeneration) return;
+        final changed = await _applyNativeSnapshot(snap, includeTransfers: true);
+        _lastSnapshotWalletHeight = snap.walletHeight;
+        _lastSnapshotBalance = snap.balanceAtomic;
+        if (changed) notifyListeners();
+      });
+    } catch (_) {}
+  }
+
+  Future<bool> _applyNativeSnapshot(
     WalletNativeSnapshot snap, {
     required bool includeTransfers,
   }) async {
+    var changed = walletHeight != snap.walletHeight ||
+        daemonBlockHeight != snap.daemonHeight ||
+        balance?.balanceAtomic != snap.balanceAtomic ||
+        balance?.unlockedAtomic != snap.unlockedAtomic ||
+        walletScanHeight != snap.restoreHeight ||
+        primaryAddress?.address != snap.address;
     balance = WalletBalance(
       balanceAtomic: snap.balanceAtomic,
       unlockedAtomic: snap.unlockedAtomic,
@@ -316,37 +338,53 @@ class WalletProvider extends ChangeNotifier {
     daemonStatus = 'Daemon height $daemonBlockHeight';
     walletScanHeight = snap.restoreHeight;
     if (includeTransfers) {
-      final list = EmbeddedWalletService.transfersFromSnapshot(snap);
-      // wallet2 may return [] until refresh; keep on-disk history visible meanwhile.
-      if (list.isNotEmpty || transfers.isEmpty) {
-        await _sortTransfersWithYield(list);
-        transfers = list;
+      final fingerprint = _fingerprintRawTransfers(snap.transfers);
+      if (fingerprint != _lastTransferFingerprint) {
+        final list = EmbeddedWalletService.transfersFromSnapshot(snap);
+        // wallet2 may return [] until refresh; keep on-disk history visible meanwhile.
+        if (list.isNotEmpty || transfers.isEmpty) {
+          await _sortTransfersWithYield(list);
+          transfers = list;
+          _lastTransferFingerprint = fingerprint;
+          changed = true;
+        }
       }
     }
+    return changed;
   }
+
+  static int _fingerprintRawTransfers(List<Map<String, dynamic>> raw) {
+    var hash = raw.length;
+    for (final row in raw) {
+      hash = Object.hash(
+        hash,
+        row['txid'],
+        row['pending'],
+        row['amount'],
+        row['timestamp'],
+      );
+    }
+    return hash;
+  }
+
+  bool _hasPendingTransfers() => transfers.any((t) => t.pending);
 
   /// Cake Wallet: yield so large tx lists do not freeze frames.
   static Future<void> _sortTransfersWithYield(List<WalletTransfer> list) async {
-    list.sort((a, b) {
-      final ta = a.timestamp;
-      final tb = b.timestamp;
-      if (ta != tb) return tb.compareTo(ta);
-      return b.height.compareTo(a.height);
-    });
-    if (list.length > 25) {
+    if (list.length > 100) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    list.sort(_compareTransfers);
+    if (list.length > 500) {
       await Future<void>.delayed(Duration.zero);
     }
   }
 
-  bool _snapshotChanged(WalletNativeSnapshot snap, {required bool includeTransfers}) {
-    if (walletHeight != snap.walletHeight ||
-        daemonBlockHeight != snap.daemonHeight ||
-        balance?.balanceAtomic != snap.balanceAtomic ||
-        balance?.unlockedAtomic != snap.unlockedAtomic) {
-      return true;
-    }
-    if (!includeTransfers) return false;
-    return transfers.length != snap.transfers.length;
+  static int _compareTransfers(WalletTransfer a, WalletTransfer b) {
+    final ta = a.timestamp;
+    final tb = b.timestamp;
+    if (ta != tb) return tb.compareTo(ta);
+    return b.height.compareTo(a.height);
   }
 
   void _clearWalletSnapshot() {
@@ -357,6 +395,7 @@ class WalletProvider extends ChangeNotifier {
     daemonBlockHeight = 0;
     daemonStatus = null;
     walletScanHeight = 0;
+    _lastTransferFingerprint = 0;
   }
 
   void _beginWalletOperation() {
@@ -420,6 +459,7 @@ class WalletProvider extends ChangeNotifier {
     _pollCount = 0;
     _lastSnapshotWalletHeight = -1;
     _lastSnapshotBalance = -1;
+    _lastTransferFingerprint = 0;
     syncStatus = WalletSyncStatus.disconnected;
     unawaited(_setWakelock(false));
   }
@@ -501,8 +541,10 @@ class WalletProvider extends ChangeNotifier {
         var needTransfers = _pollCount == 1 ||
             walletHeight != _lastSnapshotWalletHeight ||
             balance?.balanceAtomic != _lastSnapshotBalance ||
-            _pollCount % 5 == 0 ||
-            (!wasSynced && blocksBehindDaemon < kWalletSyncedBlocksThreshold);
+            _hasPendingTransfers();
+        if (!needTransfers) {
+          needTransfers = wasSynced ? _pollCount % 25 == 0 : _pollCount % 8 == 0;
+        }
         if (needTransfers && _isUpdatingTransfers) {
           needTransfers = false;
         }
@@ -521,7 +563,13 @@ class WalletProvider extends ChangeNotifier {
           _connectionUnhealthy = false;
         }
         final progress = _syncCoordinator.progressForSnapshot(snap);
+        var progressChanged = false;
         if (progress != null) {
+          final prev = _lastSyncProgress;
+          progressChanged = prev == null ||
+              prev.progressFraction != progress.progressFraction ||
+              prev.blocksLeft != progress.blocksLeft ||
+              prev.walletHeight != progress.walletHeight;
           _lastSyncProgress = progress;
         }
         if (gen != _connectGeneration) return;
@@ -530,8 +578,7 @@ class WalletProvider extends ChangeNotifier {
         if (fetchTxs) _isUpdatingTransfers = true;
         try {
           final prevSyncStatus = syncStatus;
-          final changed = _snapshotChanged(snap, includeTransfers: needTransfers);
-          await _applyNativeSnapshot(snap, includeTransfers: needTransfers);
+          final changed = await _applyNativeSnapshot(snap, includeTransfers: needTransfers);
           _lastSnapshotWalletHeight = snap.walletHeight;
           _lastSnapshotBalance = snap.balanceAtomic;
           _updateSyncStatusFromHeights();
@@ -541,7 +588,7 @@ class WalletProvider extends ChangeNotifier {
           } else {
             await _persistWalletFile(force: false);
           }
-          if (changed || syncStateChanged) {
+          if (changed || syncStateChanged || progressChanged) {
             if (daemonBlockHeight > 0) {
               errorMessage = null;
             }
@@ -699,6 +746,8 @@ class WalletProvider extends ChangeNotifier {
       if (waitForInitialSync) {
         await _runInitialWalletRefresh();
         if (_connectStale(gen)) return false;
+      } else {
+        unawaited(_loadTransfersSnapshot(gen));
       }
       await _startBlockchainSync();
       if (!waitForInitialSync) {

@@ -23,19 +23,24 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final wallet = context.watch<WalletProvider>();
     return ZentraScaffold(
       body: IndexedStack(
         index: _tab,
+        sizing: StackFit.expand,
         children: [
           _DashboardTab(
-            wallet: wallet,
             onSeeAllTx: () => setState(() => _tab = 2),
             onOpenSettings: () => setState(() => _tab = 3),
           ),
-          _AssetsTab(wallet: wallet),
-          const TransactionsScreen(embedded: true),
-          const SettingsScreen(embedded: true),
+          const _AssetsTab(),
+          TickerMode(
+            enabled: _tab == 2,
+            child: const TransactionsScreen(embedded: true),
+          ),
+          TickerMode(
+            enabled: _tab == 3,
+            child: const SettingsScreen(embedded: true),
+          ),
         ],
       ),
       bottomNavigationBar: ZentraBottomNav(
@@ -46,14 +51,65 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+class _DashboardViewState {
+  const _DashboardViewState({
+    required this.walletFilename,
+    required this.networkLabel,
+    required this.isRefreshing,
+    required this.balance,
+    required this.lockedBalanceAtomic,
+    required this.address,
+    required this.transfers,
+    required this.canTransact,
+    required this.isSynced,
+  });
+
+  final String? walletFilename;
+  final String? networkLabel;
+  final bool isRefreshing;
+  final WalletBalance? balance;
+  final int lockedBalanceAtomic;
+  final String address;
+  final List<WalletTransfer> transfers;
+  final bool canTransact;
+  final bool isSynced;
+
+  @override
+  bool operator ==(Object other) {
+    return other is _DashboardViewState &&
+        walletFilename == other.walletFilename &&
+        networkLabel == other.networkLabel &&
+        isRefreshing == other.isRefreshing &&
+        balance?.balanceAtomic == other.balance?.balanceAtomic &&
+        balance?.unlockedAtomic == other.balance?.unlockedAtomic &&
+        lockedBalanceAtomic == other.lockedBalanceAtomic &&
+        address == other.address &&
+        identical(transfers, other.transfers) &&
+        canTransact == other.canTransact &&
+        isSynced == other.isSynced;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+        walletFilename,
+        networkLabel,
+        isRefreshing,
+        balance?.balanceAtomic,
+        balance?.unlockedAtomic,
+        lockedBalanceAtomic,
+        address,
+        transfers,
+        canTransact,
+        isSynced,
+      );
+}
+
 class _DashboardTab extends StatelessWidget {
   const _DashboardTab({
-    required this.wallet,
     required this.onSeeAllTx,
     required this.onOpenSettings,
   });
 
-  final WalletProvider wallet;
   final VoidCallback onSeeAllTx;
   final VoidCallback onOpenSettings;
 
@@ -61,9 +117,9 @@ class _DashboardTab extends StatelessWidget {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ReceiveScreen()));
   }
 
-  void _openSend(BuildContext context) {
-    if (!wallet.canTransact) {
-      final msg = !wallet.isSynced
+  void _openSend(BuildContext context, _DashboardViewState state) {
+    if (!state.canTransact) {
+      final msg = !state.isSynced
           ? 'Wait for sync to finish before sending'
           : 'Wait until the wallet is connected';
       zentraSnack(context, msg, isError: true);
@@ -74,70 +130,93 @@ class _DashboardTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final balance = wallet.balance;
-    final recent = wallet.transfers.take(8).toList();
-    final address = wallet.primaryAddress?.address ?? '';
+    return Selector<WalletProvider, _DashboardViewState>(
+      selector: (_, wallet) => _DashboardViewState(
+        walletFilename: wallet.walletFilename,
+        networkLabel: wallet.networkConfig?.label,
+        isRefreshing: wallet.isRefreshing,
+        balance: wallet.balance,
+        lockedBalanceAtomic: wallet.lockedBalanceAtomic,
+        address: wallet.primaryAddress?.address ?? '',
+        transfers: wallet.transfers,
+        canTransact: wallet.canTransact,
+        isSynced: wallet.isSynced,
+      ),
+      builder: (context, state, _) {
+        final wallet = context.read<WalletProvider>();
+        final balance = state.balance;
+        final recent = state.transfers.take(8).toList(growable: false);
 
-    return RefreshIndicator(
-      color: ZentraTheme.accent,
-      onRefresh: wallet.refresh,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: EdgeInsets.only(bottom: ZentraTheme.navBarHeight + MediaQuery.paddingOf(context).bottom + 24),
-        children: [
-          ZentraHomeTopBar(
-            walletName: wallet.walletFilename,
-            networkLabel: wallet.networkConfig?.label,
-            isRefreshing: wallet.isRefreshing,
-            onRefresh: wallet.refresh,
-            onSettings: onOpenSettings,
-          ),
-          ZentraHeroBalanceCard(
-            amountZtr: balance != null
-                ? '${wallet.formatAmount(balance.balanceAtomic)} ZTRA'
-                : '— ZTRA',
-            unlockedZtr: balance != null
-                ? '${wallet.formatAmount(balance.unlockedAtomic)} ZTRA'
-                : null,
-            lockedZtr: wallet.lockedBalanceAtomic > 0
-                ? '${wallet.formatAmount(wallet.lockedBalanceAtomic)} ZTRA'
-                : null,
-            secondaryLabel: wallet.networkConfig?.label,
-          ),
-          if (address.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-              child: Center(child: ZentraAddressChip(address: address)),
-            ),
-          ZentraQuickActionsRow(
-            actions: [
-              ZentraQuickActionItem(icon: Icons.arrow_outward_rounded, label: 'Send', onTap: () => _openSend(context)),
-              ZentraQuickActionItem(icon: Icons.arrow_downward_rounded, label: 'Receive', onTap: () => _openReceive(context)),
-            ],
-          ),
-          ZentraSectionHeader(title: 'Recent activity', actionLabel: 'See all', onAction: onSeeAllTx),
-          if (recent.isEmpty)
-            ZentraEmptyState(
-              icon: Icons.receipt_long_outlined,
-              title: 'No transactions yet',
-              subtitle: 'Receive ZTRA to this wallet to see activity here.',
-              actionLabel: 'Receive',
-              onAction: () => _openReceive(context),
-            )
-          else
-            Container(
-              margin: ZentraTheme.pagePadding,
-              decoration: ZentraTheme.gradientCard(),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                children: [
-                  for (var i = 0; i < recent.length; i++)
-                    _txRow(context, recent[i], wallet.formatAmount, showDivider: i < recent.length - 1),
+        return RefreshIndicator(
+          color: ZentraTheme.accent,
+          onRefresh: wallet.refresh,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.only(bottom: ZentraTheme.navBarHeight + MediaQuery.paddingOf(context).bottom + 24),
+            children: [
+              ZentraHomeTopBar(
+                walletName: state.walletFilename,
+                networkLabel: state.networkLabel,
+                isRefreshing: state.isRefreshing,
+                onRefresh: wallet.refresh,
+                onSettings: onOpenSettings,
+              ),
+              ZentraHeroBalanceCard(
+                amountZtr: balance != null
+                    ? '${wallet.formatAmount(balance.balanceAtomic)} ZTRA'
+                    : '— ZTRA',
+                unlockedZtr: balance != null
+                    ? '${wallet.formatAmount(balance.unlockedAtomic)} ZTRA'
+                    : null,
+                lockedZtr: state.lockedBalanceAtomic > 0
+                    ? '${wallet.formatAmount(state.lockedBalanceAtomic)} ZTRA'
+                    : null,
+                secondaryLabel: state.networkLabel,
+              ),
+              if (state.address.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                  child: Center(child: ZentraAddressChip(address: state.address)),
+                ),
+              ZentraQuickActionsRow(
+                actions: [
+                  ZentraQuickActionItem(
+                    icon: Icons.arrow_outward_rounded,
+                    label: 'Send',
+                    onTap: () => _openSend(context, state),
+                  ),
+                  ZentraQuickActionItem(
+                    icon: Icons.arrow_downward_rounded,
+                    label: 'Receive',
+                    onTap: () => _openReceive(context),
+                  ),
                 ],
               ),
-            ),
-        ],
-      ),
+              ZentraSectionHeader(title: 'Recent activity', actionLabel: 'See all', onAction: onSeeAllTx),
+              if (recent.isEmpty)
+                ZentraEmptyState(
+                  icon: Icons.receipt_long_outlined,
+                  title: 'No transactions yet',
+                  subtitle: 'Receive ZTRA to this wallet to see activity here.',
+                  actionLabel: 'Receive',
+                  onAction: () => _openReceive(context),
+                )
+              else
+                Container(
+                  margin: ZentraTheme.pagePadding,
+                  decoration: ZentraTheme.gradientCard(),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(
+                    children: [
+                      for (var i = 0; i < recent.length; i++)
+                        _txRow(context, recent[i], wallet.formatAmount, showDivider: i < recent.length - 1),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -161,57 +240,90 @@ class _DashboardTab extends StatelessWidget {
   }
 }
 
-class _AssetsTab extends StatelessWidget {
-  const _AssetsTab({required this.wallet});
+class _AssetsViewState {
+  const _AssetsViewState({
+    required this.balance,
+    required this.lockedBalanceAtomic,
+  });
 
-  final WalletProvider wallet;
+  final WalletBalance? balance;
+  final int lockedBalanceAtomic;
+
+  @override
+  bool operator ==(Object other) {
+    return other is _AssetsViewState &&
+        balance?.balanceAtomic == other.balance?.balanceAtomic &&
+        balance?.unlockedAtomic == other.balance?.unlockedAtomic &&
+        lockedBalanceAtomic == other.lockedBalanceAtomic;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+        balance?.balanceAtomic,
+        balance?.unlockedAtomic,
+        lockedBalanceAtomic,
+      );
+}
+
+class _AssetsTab extends StatelessWidget {
+  const _AssetsTab();
 
   @override
   Widget build(BuildContext context) {
-    final balance = wallet.balance;
-    return RefreshIndicator(
-      color: ZentraTheme.accent,
-      onRefresh: wallet.refresh,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: EdgeInsets.only(bottom: ZentraTheme.navBarHeight + MediaQuery.paddingOf(context).bottom + 24),
-        children: [
-          const ZentraDashboardHeader(title: 'Assets'),
-          ZentraHeroBalanceCard(
-            amountZtr: balance != null
-                ? '${wallet.formatAmount(balance.balanceAtomic)} ZTRA'
-                : '— ZTRA',
-            unlockedZtr: balance != null
-                ? '${wallet.formatAmount(balance.unlockedAtomic)} ZTRA'
-                : null,
-            lockedZtr: wallet.lockedBalanceAtomic > 0
-                ? '${wallet.formatAmount(wallet.lockedBalanceAtomic)} ZTRA'
-                : null,
-          ),
-          const SizedBox(height: 12),
-          Container(
-            margin: ZentraTheme.pagePadding,
-            decoration: ZentraTheme.gradientCard(),
-            clipBehavior: Clip.antiAlias,
-            child: ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              leading: Container(
-                width: 48,
-                height: 48,
-                alignment: Alignment.center,
-                decoration: ZentraTheme.iconCircle(),
-                child: const ZentraLogo(size: 32),
-              ),
-              title: const Text('Zentra', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-              subtitle: const Text('Native coin · ZTRA', style: TextStyle(color: ZentraTheme.textMuted, fontSize: 12)),
-              trailing: Text(
-                balance != null ? '${wallet.formatAmount(balance.balanceAtomic)} ZTRA' : '0',
-                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: ZentraTheme.primary),
-              ),
-            ),
-          ),
-        ],
+    return Selector<WalletProvider, _AssetsViewState>(
+      selector: (_, wallet) => _AssetsViewState(
+        balance: wallet.balance,
+        lockedBalanceAtomic: wallet.lockedBalanceAtomic,
       ),
+      builder: (context, state, _) {
+        final wallet = context.read<WalletProvider>();
+        final balance = state.balance;
+
+        return RefreshIndicator(
+          color: ZentraTheme.accent,
+          onRefresh: wallet.refresh,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.only(bottom: ZentraTheme.navBarHeight + MediaQuery.paddingOf(context).bottom + 24),
+            children: [
+              const ZentraDashboardHeader(title: 'Assets'),
+              ZentraHeroBalanceCard(
+                amountZtr: balance != null
+                    ? '${wallet.formatAmount(balance.balanceAtomic)} ZTRA'
+                    : '— ZTRA',
+                unlockedZtr: balance != null
+                    ? '${wallet.formatAmount(balance.unlockedAtomic)} ZTRA'
+                    : null,
+                lockedZtr: state.lockedBalanceAtomic > 0
+                    ? '${wallet.formatAmount(state.lockedBalanceAtomic)} ZTRA'
+                    : null,
+              ),
+              const SizedBox(height: 12),
+              Container(
+                margin: ZentraTheme.pagePadding,
+                decoration: ZentraTheme.gradientCard(),
+                clipBehavior: Clip.antiAlias,
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  leading: Container(
+                    width: 48,
+                    height: 48,
+                    alignment: Alignment.center,
+                    decoration: ZentraTheme.iconCircle(),
+                    child: const ZentraLogo(size: 32),
+                  ),
+                  title: const Text('Zentra', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                  subtitle: const Text('Native coin · ZTRA', style: TextStyle(color: ZentraTheme.textMuted, fontSize: 12)),
+                  trailing: Text(
+                    balance != null ? '${wallet.formatAmount(balance.balanceAtomic)} ZTRA' : '0',
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: ZentraTheme.primary),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

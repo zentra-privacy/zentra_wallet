@@ -23,6 +23,11 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   int _filter = 0;
   int _visibleCount = _initialPageSize;
   late final ScrollController _scrollController;
+  WalletProvider? _wallet;
+  bool _viewportFillQueued = false;
+  List<WalletTransfer>? _filterCacheSource;
+  List<WalletTransfer> _incomingCache = const [];
+  List<WalletTransfer> _outgoingCache = const [];
 
   @override
   void initState() {
@@ -31,25 +36,57 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final wallet = context.read<WalletProvider>();
+    if (_wallet == wallet) return;
+    _wallet?.removeListener(_onWalletUpdated);
+    _wallet = wallet;
+    wallet.addListener(_onWalletUpdated);
+    _queueViewportFill();
+  }
+
+  void _queueViewportFill() {
+    if (_viewportFillQueued) return;
+    _viewportFillQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _viewportFillQueued = false;
+      final wallet = _wallet;
+      if (!mounted || wallet == null) return;
+      _scheduleFillViewportIfNeeded(_filteredList(wallet).length);
+    });
+  }
+
+  @override
   void dispose() {
+    _wallet?.removeListener(_onWalletUpdated);
     _scrollController.dispose();
     super.dispose();
   }
 
+  void _onWalletUpdated() {
+    final wallet = _wallet;
+    if (wallet == null || !mounted) return;
+    if (identical(_filterCacheSource, wallet.transfers)) return;
+
+    final list = _filteredList(wallet);
+    if (_visibleCount > list.length) {
+      setState(() => _visibleCount = list.length);
+    }
+    _scheduleFillViewportIfNeeded(list.length);
+  }
+
   void _onScroll() {
-    if (_filter != 0 || !_scrollController.hasClients) return;
+    if (!_scrollController.hasClients) return;
     final pos = _scrollController.position;
     if (pos.pixels >= pos.maxScrollExtent - 240) {
       _loadMoreIfNeeded();
     }
   }
 
-  /// When the first page is shorter than the viewport, there is nothing to scroll
-  /// and [_onScroll] never runs — load more until the list scrolls or all items show.
-  void _scheduleFillViewportIfNeeded() {
+  void _scheduleFillViewportIfNeeded(int total) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _filter != 0 || !_scrollController.hasClients) return;
-      final total = context.read<WalletProvider>().transfers.length;
+      if (!mounted || !_scrollController.hasClients) return;
       if (_visibleCount >= total) return;
       if (_scrollController.position.maxScrollExtent > 48) return;
 
@@ -58,18 +95,32 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
         _visibleCount = (_visibleCount + _loadMorePageSize).clamp(0, total);
       });
       if (_visibleCount > before && _visibleCount < total) {
-        _scheduleFillViewportIfNeeded();
+        _scheduleFillViewportIfNeeded(total);
       }
     });
   }
 
-  bool _loadMoreIfNeeded() {
-    final total = context.read<WalletProvider>().transfers.length;
-    if (_visibleCount >= total) return false;
+  void _loadMoreIfNeeded() {
+    final wallet = _wallet ?? context.read<WalletProvider>();
+    final total = _filteredList(wallet).length;
+    if (_visibleCount >= total) return;
     setState(() {
       _visibleCount = (_visibleCount + _loadMorePageSize).clamp(0, total);
     });
-    return _visibleCount < total;
+  }
+
+  List<WalletTransfer> _filteredList(WalletProvider wallet) {
+    final all = wallet.transfers;
+    if (_filterCacheSource != all) {
+      _filterCacheSource = all;
+      _incomingCache = all.where((t) => t.isIncoming).toList(growable: false);
+      _outgoingCache = all.where((t) => !t.isIncoming).toList(growable: false);
+    }
+    return switch (_filter) {
+      1 => _incomingCache,
+      2 => _outgoingCache,
+      _ => all,
+    };
   }
 
   void _onFilterChanged(Set<int> selection) {
@@ -77,11 +128,12 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     if (next == _filter) return;
     setState(() {
       _filter = next;
-      if (next == 0) _visibleCount = _initialPageSize;
+      _visibleCount = _initialPageSize;
     });
     if (_scrollController.hasClients) {
       _scrollController.jumpTo(0);
     }
+    _queueViewportFill();
   }
 
   EdgeInsets _listBottomPadding(BuildContext context) {
@@ -90,103 +142,84 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final wallet = context.watch<WalletProvider>();
-    var list = wallet.transfers;
-    if (_filter == 1) list = list.where((t) => t.isIncoming).toList();
-    if (_filter == 2) list = list.where((t) => !t.isIncoming).toList();
+    return Selector<WalletProvider, _HistoryViewState>(
+      selector: (_, wallet) => _HistoryViewState(
+        transfers: wallet.transfers,
+        isRefreshing: wallet.isRefreshing,
+      ),
+      builder: (context, viewState, _) {
+        final wallet = context.read<WalletProvider>();
+        final list = _filteredList(wallet);
 
-    final listBody = list.isEmpty
-        ? RefreshIndicator(
-            color: ZentraTheme.accent,
-            onRefresh: wallet.refresh,
-            child: ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: _listBottomPadding(context),
-              children: [
-                Center(
-                  child: ZentraEmptyState(
-                    icon: Icons.history,
-                    title: 'No transactions',
-                    subtitle: _filter == 0
-                        ? 'Your incoming and outgoing transfers will appear here.'
-                        : 'Nothing in this filter yet.',
-                  ),
-                ),
-              ],
-            ),
-          )
-        : _filter == 0
-            ? _buildLazyAllList(context, wallet, list)
-            : RefreshIndicator(
+        final listBody = list.isEmpty
+            ? RefreshIndicator(
                 color: ZentraTheme.accent,
                 onRefresh: wallet.refresh,
                 child: ListView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   padding: _listBottomPadding(context),
                   children: [
-                    Container(
-                      margin: ZentraTheme.pagePadding,
-                      decoration: ZentraTheme.gradientCard(),
-                      clipBehavior: Clip.antiAlias,
-                      child: Column(
-                        children: [
-                          for (var i = 0; i < list.length; i++)
-                            _row(context, list[i], wallet.formatAmount, i < list.length - 1),
-                        ],
+                    Center(
+                      child: ZentraEmptyState(
+                        icon: Icons.history,
+                        title: 'No transactions',
+                        subtitle: _filter == 0
+                            ? 'Your incoming and outgoing transfers will appear here.'
+                            : 'Nothing in this filter yet.',
                       ),
                     ),
                   ],
                 ),
-              );
+              )
+            : _buildLazyList(context, wallet, list);
 
-    final content = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (widget.embedded)
-          ZentraDashboardHeader(
+        final content = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (widget.embedded)
+              ZentraDashboardHeader(
+                title: 'History',
+                isRefreshing: viewState.isRefreshing,
+                onRefresh: wallet.refresh,
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+              child: SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment(value: 0, label: Text('All')),
+                  ButtonSegment(value: 1, label: Text('Received')),
+                  ButtonSegment(value: 2, label: Text('Sent')),
+                ],
+                selected: {_filter},
+                onSelectionChanged: _onFilterChanged,
+              ),
+            ),
+            Expanded(child: listBody),
+          ],
+        );
+
+        if (widget.embedded) return content;
+
+        return ZentraScaffold(
+          appBar: zentraAppBar(
+            context,
             title: 'History',
-            isRefreshing: wallet.isRefreshing,
-            onRefresh: wallet.refresh,
-          ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-          child: SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(value: 0, label: Text('All')),
-              ButtonSegment(value: 1, label: Text('Received')),
-              ButtonSegment(value: 2, label: Text('Sent')),
+            actions: [
+              zentraAppBarAction(
+                icon: Icons.refresh,
+                onPressed: viewState.isRefreshing ? null : wallet.refresh,
+                tooltip: 'Refresh',
+              ),
             ],
-            selected: {_filter},
-            onSelectionChanged: _onFilterChanged,
           ),
-        ),
-        Expanded(child: listBody),
-      ],
-    );
-
-    if (widget.embedded) return content;
-
-    return ZentraScaffold(
-      appBar: zentraAppBar(
-        context,
-        title: 'History',
-        actions: [
-          zentraAppBarAction(
-            icon: Icons.refresh,
-            onPressed: wallet.isRefreshing ? null : wallet.refresh,
-            tooltip: 'Refresh',
-          ),
-        ],
-      ),
-      body: content,
+          body: content,
+        );
+      },
     );
   }
 
-  Widget _buildLazyAllList(BuildContext context, WalletProvider wallet, List<WalletTransfer> list) {
+  Widget _buildLazyList(BuildContext context, WalletProvider wallet, List<WalletTransfer> list) {
     final displayCount = _visibleCount.clamp(0, list.length);
-    if (displayCount < list.length) {
-      _scheduleFillViewportIfNeeded();
-    }
 
     return RefreshIndicator(
       color: ZentraTheme.accent,
@@ -227,4 +260,24 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       onTap: () => showZentraTxDetailSheet(context, transfer: t, formatAmount: format),
     );
   }
+}
+
+class _HistoryViewState {
+  const _HistoryViewState({
+    required this.transfers,
+    required this.isRefreshing,
+  });
+
+  final List<WalletTransfer> transfers;
+  final bool isRefreshing;
+
+  @override
+  bool operator ==(Object other) {
+    return other is _HistoryViewState &&
+        identical(transfers, other.transfers) &&
+        isRefreshing == other.isRefreshing;
+  }
+
+  @override
+  int get hashCode => Object.hash(transfers, isRefreshing);
 }
